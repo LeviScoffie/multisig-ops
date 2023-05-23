@@ -1,11 +1,15 @@
 import json
 import os
 from pathlib import Path
+from typing import Dict
+from typing import Optional
+from typing import Tuple
 from urllib.request import urlopen
 
 from bal_addresses import AddrBook
 from brownie import Contract
 from brownie import network
+from dotenv import load_dotenv
 from prettytable import PrettyTable
 from web3 import Web3
 
@@ -14,7 +18,7 @@ flatbook = a.flatbook
 debug = False
 
 
-def dicts_to_table_string(dict_list, header=None):
+def dicts_to_table_string(dict_list: list, header: str = None) -> str:
     table = PrettyTable(header)
     for dict_ in dict_list:
         table.add_row(list(dict_.values()))
@@ -24,68 +28,74 @@ def dicts_to_table_string(dict_list, header=None):
     return str(table)
 
 
-def get_pool_info(pool_address: str):
-    pool_abi = json.load(open("abis/IBalPool.json", "r"))
+def get_root_dir():
+    return os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+
+def get_pool_info(pool_address: str) -> Tuple[str, str, str, str, str]:
+    brownie_dir = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+    pool_abi = json.load(open(f"{brownie_dir}/abis/IBalPool.json", "r"))
     pool = Contract.from_abi(name="IBalPool", address=pool_address, abi=pool_abi)
     try:
-        (aFactor, ramp, divisor) = pool.getAmplificationParameter()
-        aFactor = int(aFactor / divisor)
-        if not isinstance(aFactor, int):
-            aFactor = "N/A"
-    except:
-        aFactor = "N/A"
+        (a_factor, ramp, divisor) = pool.getAmplificationParameter()
+        a_factor = int(a_factor / divisor)
+        if not isinstance(a_factor, int):
+            a_factor = "N/A"
+    except Exception:
+        a_factor = "N/A"
     name = pool.name()
     symbol = pool.symbol()
     try:
         poolId = str(pool.getPoolId())
-    except:
+    except Exception:
         poolId = "Custom"
     if pool.totalSupply == 0:
         symbol = f"WARN: {symbol} no initjoin"
-    return name, symbol, poolId, pool.address, aFactor
+    return name, symbol, poolId, pool.address, a_factor
 
 
-def get_payload_list():
+def get_payload_list() -> list[str]:
     github_repo = os.environ["GITHUB_REPOSITORY"]
     pr_number = os.environ["PR_NUMBER"]
     api_url = f'https://api.github.com/repos/{github_repo}/pulls/{pr_number}/files'
-    if debug:
-        print(f"api url: {api_url}")
     url = urlopen(api_url)
     pr_file_data = json.loads(url.read())
 
     changed_files = []
     for file_json in pr_file_data:
         filename = (file_json['filename'])
-        if debug:
-            print(filename)
         if "BIPs/" in filename and filename.endswith(".json"):
             changed_files.append(filename)
-        if debug:
-            print(f"Changed Files:{changed_files}")
     return changed_files
 
 
+def parse_file(file: str) -> Optional[Dict]:
+    root_dir = get_root_dir()
+    with open(os.path.join(root_dir, file), "r") as json_data:
+        try:
+            payload = json.load(json_data)
+        except json.decoder.JSONDecodeError:
+            print(f"{file} is not proper json")
+            return None
+    if isinstance(payload, dict) is False:
+        print(f"{file} json is not a dict")
+        return None
+    if "transactions" not in payload.keys():
+        print(f"{file} json does not contain a list of transactions")
+        return None
+    return payload
+
+
 def gen_report(payload_list):
+    if not network.is_connected():
+        network.connect("mainnet")
     report = ""
     reports = []
-    # Need to go up 4 levels to get to the root of the repo
-    root_dir = os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    )
     for file in payload_list:
         print(f"Processing: {file}")
-        with open(os.path.join(root_dir, file), "r") as json_data:
-            try:
-                payload = json.load(json_data)
-            except:
-                print(f"{file} is not proper json")
-                continue
-        if isinstance(payload, dict) is False:
-            print(f"{file} json is not a dict")
-            continue
-        if "transactions" not in payload.keys():
-            print(f"{file} json deos not contain a list of transactions")
+        payload = parse_file(file)
+        if not payload:
             continue
         network.disconnect()
         network.connect("mainnet")
@@ -242,6 +252,9 @@ def gen_report(payload_list):
 
 
 def main():
+    # Get root dir, need to go up 4 levels to get to root from here
+    root_dir = get_root_dir()
+    load_dotenv()
     reports = gen_report(get_payload_list())
     # Generate comment output
     with open("output.txt", "w") as f:
@@ -251,7 +264,7 @@ def main():
     for report in reports:
         filename = Path(f"{report.splitlines()[0]}")
         filename = filename.with_suffix(".report.txt")
-        with open(f"../../{filename}", "w") as f:
+        with open(os.path.join(root_dir, filename), "w") as f:
             f.write(report)
 
 
